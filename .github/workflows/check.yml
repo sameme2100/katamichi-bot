@@ -29,6 +29,7 @@ jobs:
           FILTER_DEPARTURE: ${{ vars.FILTER_DEPARTURE }}
           FILTER_ARRIVAL: ${{ vars.FILTER_ARRIVAL }}
           FILTER_KEYWORD: ${{ vars.FILTER_KEYWORD }}
+          SEND_TEST: "true"
         run: python main.py
 
       - name: state.jsonを保存
