@@ -29,155 +29,101 @@ def normalize(s):
 
 def parse_records(html):
     soup = BeautifulSoup(html, "html.parser")
-
-    # The official page is rendered as repeated blocks containing these labels.
-    # We intentionally parse visible text rather than relying on Toyota's CSS class names,
-    # which are more likely to change.
     lines = [normalize(x) for x in soup.stripped_strings]
+
     records = []
     current = None
-    label_map = {
-        "出発店舗": "departure",
-        "返却店舗": "arrival",
-        "出発期間": "period",
-        "車種": "car",
-        "車両条件": "condition",
-        "予約電話番号": "phone",
+
+    def next_value(start, skip):
+        j = start
+        while j < len(lines):
+            if lines[j] not in skip:
+                return lines[j], j
+            j += 1
+        return "", j
+
+    skip = {
+        "出発店舗",
+        "返却店舗",
+        "出発期間",
+        "車種",
+        "車両条件",
+        "予約電話番号",
+        "出発",
+        "返却",
+        "店舗",
     }
 
     i = 0
     while i < len(lines):
-        line = lines[i]
+        if lines[i] != "出発店舗":
+            i += 1
+            continue
 
-        if line == "出発店舗":
-            if current and current.get("departure"):
-                records.append(current)
-            current = {}
-            if i + 1 < len(lines):
-                current["departure"] = lines[i + 1]
+        # 「出発店舗」の次にある実際の店舗名を探す
+        departure, j = next_value(i + 1, skip)
 
-        elif current is not None and line in label_map and line != "出発店舗":
-            key = label_map[line]
-            if i + 1 < len(lines):
-                value = lines[i + 1]
-                # Some page elements put a label immediately before another label.
-                if value not in label_map:
-                    current[key] = value
+        # ページ上部の見出し部分は無視
+        if not departure or "県" not in departure and "店" not in departure:
+            i += 1
+            continue
 
-        i += 1
+        current = {"departure": departure}
 
-    if current and current.get("departure"):
-        records.append(current)
+        # 返却店舗
+        try:
+            k = lines.index("返却店舗", j)
+            arrival, k = next_value(k + 1, skip)
+            current["arrival"] = arrival
+        except ValueError:
+            current["arrival"] = ""
 
-    # Remove obvious duplicates created by responsive/hidden DOM copies.
+        # 出発期間
+        try:
+            k = lines.index("出発期間", j)
+            period, k = next_value(k + 1, skip)
+            current["period"] = period
+        except ValueError:
+            current["period"] = ""
+
+        # 車種
+        try:
+            k = lines.index("車種", j)
+            car, k = next_value(k + 1, skip)
+            current["car"] = car
+        except ValueError:
+            current["car"] = ""
+
+        # 車両条件
+        try:
+            k = lines.index("車両条件", j)
+            condition, k = next_value(k + 1, skip)
+            current["condition"] = condition
+        except ValueError:
+            current["condition"] = ""
+
+        # 予約電話番号
+        try:
+            k = lines.index("予約電話番号", j)
+            # 電話番号の直前に店舗名が入るため、
+            # 電話番号形式の文字列を探す
+            phone = ""
+            for candidate in lines[k + 1:k + 5]:
+                if re.fullmatch(r"\d{2,4}-\d{2,4}-\d{3,4}", candidate):
+                    phone = candidate
+                    break
+            current["phone"] = phone
+        except ValueError:
+            current["phone"] = ""
+
+        if current["departure"] and current["arrival"]:
+            records.append(current)
+
+        i = j + 1
+
+    # 重複除去
     unique = {}
     for r in records:
-        fp = fingerprint(r)
-        unique[fp] = r
+        unique[fingerprint(r)] = r
+
     return list(unique.values())
-
-
-def fingerprint(record):
-    raw = "\x1f".join(
-        record.get(k, "") for k in
-        ("departure", "arrival", "period", "car", "condition", "phone")
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def matches(record):
-    if FILTER_DEPARTURE and FILTER_DEPARTURE not in record.get("departure", ""):
-        return False
-    if FILTER_ARRIVAL and FILTER_ARRIVAL not in record.get("arrival", ""):
-        return False
-    if FILTER_KEYWORD:
-        haystack = " ".join(record.values())
-        if FILTER_KEYWORD.lower() not in haystack.lower():
-            return False
-    return True
-
-
-def load_state():
-    if not STATE_FILE.exists():
-        return set()
-    try:
-        return set(json.loads(STATE_FILE.read_text(encoding="utf-8")))
-    except Exception:
-        return set()
-
-
-def save_state(state):
-    # Keep the state bounded.
-    STATE_FILE.write_text(
-        json.dumps(list(state)[-5000:], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def discord_send(record):
-    def esc(s):
-        return s.replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_")
-
-    fields = [
-        {"name": "出発", "value": esc(record.get("departure", "不明")), "inline": False},
-        {"name": "返却", "value": esc(record.get("arrival", "不明")), "inline": False},
-        {"name": "期間", "value": esc(record.get("period", "不明")), "inline": True},
-        {"name": "車種", "value": esc(record.get("car", "不明")), "inline": True},
-        {"name": "条件", "value": esc(record.get("condition", "不明")), "inline": False},
-        {"name": "予約電話", "value": esc(record.get("phone", "不明")), "inline": True},
-    ]
-
-    payload = {
-        "username": "片道GO通知",
-        "embeds": [{
-            "title": "🚗 片道GO 新着",
-            "url": URL,
-            "fields": fields,
-        }],
-    }
-
-    r = requests.post(WEBHOOK_URL, json=payload, timeout=20)
-    r.raise_for_status()
-
-
-def main():
-    r = requests.get(URL, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-
-    records = [r for r in parse_records(r.text) if matches(r)]
-    print(f"取得: {len(records)}件")
-
-    old = load_state()
-    current = {fingerprint(r): r for r in records}
-
-    if os.getenv("SEND_TEST") == "true" and current:
-        first = next(iter(current.values()))
-        print("テスト通知:", first)
-        discord_send(first)
-        return
-
-    # First run is silent by default so the bot doesn't flood Discord with
-
-    # First run is silent by default so the bot doesn't flood Discord with
-    # every car currently listed on the official page.
-    if not old:
-        if current:
-            first = next(iter(current.values()))
-            print("初回テスト通知:", first)
-            discord_send(first)
-        save_state(set(current))
-        print("初回実行: 現在掲載中の案件を記録しました")
-        return
-
-    new_ids = [fp for fp in current if fp not in old]
-
-    for fp in new_ids:
-        print("新着:", current[fp])
-        discord_send(current[fp])
-
-    save_state(set(current))
-    print(f"新着通知: {len(new_ids)}件")
-
-
-if __name__ == "__main__":
-    main()
