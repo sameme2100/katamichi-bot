@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+
 URL = os.getenv(
     "KATAMICHI_URL",
     "https://cp.toyota.jp/rentacar/?padid=ag270_fr_top_onewayma_m",
@@ -25,15 +26,23 @@ HEADERS = {
 }
 
 
-def normalize(s):
-    return re.sub(r"\s+", " ", s or "").strip()
+def normalize(value):
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def fingerprint(record):
     raw = "\x1f".join(
-        record.get(k, "")
-        for k in ("departure", "arrival", "period", "car", "condition", "phone")
+        record.get(key, "")
+        for key in (
+            "departure",
+            "arrival",
+            "period",
+            "car",
+            "condition",
+            "phone",
+        )
     )
+
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -41,72 +50,131 @@ def parse_records(html):
     soup = BeautifulSoup(html, "html.parser")
     lines = [normalize(x) for x in soup.stripped_strings]
 
-    labels = {
-        "出発店舗",
-        "返却店舗",
-        "出発期間",
-        "車種",
-        "車両条件",
-        "予約電話番号",
-    }
-
     records = []
 
-    # 「出発店舗」が出てくる位置ごとに1案件として処理する
-    starts = [i for i, line in enumerate(lines) if line == "出発店舗"]
+    # 「出発」「店舗」「店舗名」という並びを
+    # 実際の案件の開始位置として探す
+    starts = []
 
+    for i in range(len(lines) - 2):
+        if lines[i] == "出発" and lines[i + 1] == "店舗":
+            store = lines[i + 2]
+
+            # 店舗名らしいものだけを案件開始として扱う
+            if "店" in store:
+                starts.append(i)
+
+    # 案件ごとに区切って解析
     for n, start in enumerate(starts):
-        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+
+        if n + 1 < len(starts):
+            end = starts[n + 1]
+        else:
+            end = len(lines)
+
         block = lines[start:end]
 
-        # 最初の「出発店舗」はページ上部の見出しなので、
-        # 実際の店舗名が取れなければスキップ
-        def value_after(label):
+        if len(block) < 3:
+            continue
+
+        # -------------------------
+        # 出発店舗
+        # -------------------------
+
+        departure = block[2]
+
+        # -------------------------
+        # 返却店舗
+        # -------------------------
+
+        arrival = ""
+
+        for i in range(len(block) - 2):
+            if block[i] == "返却" and block[i + 1] == "店舗":
+                arrival = block[i + 2]
+                break
+
+        # -------------------------
+        # ラベルの直後から値を探す
+        # -------------------------
+
+        def get_value(label):
             try:
                 pos = block.index(label)
             except ValueError:
                 return ""
 
-            # ラベルの後ろから、別のラベルではない最初の文字列を探す
+            ignored = {
+                "出発",
+                "返却",
+                "店舗",
+                "さらに詳細をみる",
+                "詳細を閉じる",
+            }
+
             for value in block[pos + 1:]:
-                if value in labels:
+                if not value:
                     continue
-                if value in {"出発", "返却", "店舗"}:
+
+                if value in ignored:
                     continue
+
+                # 次の主要ラベルに到達したら値なし
+                if value in {
+                    "出発期間",
+                    "車種",
+                    "車両条件",
+                    "予約電話番号",
+                }:
+                    return ""
+
                 return value
 
             return ""
 
-        departure = value_after("出発店舗")
-        arrival = value_after("返却店舗")
-        period = value_after("出発期間")
-        car = value_after("車種")
-        condition = value_after("車両条件")
+        period = get_value("出発期間")
+        car = get_value("車種")
+        condition = get_value("車両条件")
 
-        # 電話番号は「予約電話番号」の後ろから探す
+        # -------------------------
+        # 電話番号
+        # -------------------------
+
         phone = ""
+
         try:
             pos = block.index("予約電話番号")
+
             for value in block[pos + 1:]:
-                if re.fullmatch(r"\d{2,4}-\d{2,4}-\d{3,4}", value):
+                if re.fullmatch(
+                    r"\d{2,4}-\d{2,4}-\d{3,4}",
+                    value,
+                ):
                     phone = value
                     break
+
         except ValueError:
             pass
 
-        # 店舗名らしい出発店舗が取れたものだけ採用
+        # -------------------------
+        # 正常な案件だけ登録
+        # -------------------------
+
         if departure and arrival and period and car and condition:
-            records.append({
+            record = {
                 "departure": departure,
                 "arrival": arrival,
                 "period": period,
                 "car": car,
                 "condition": condition,
                 "phone": phone,
-            })
+            }
+
+            records.append(record)
 
     # 重複除去
     unique = {}
+
     for record in records:
         unique[fingerprint(record)] = record
 
@@ -114,14 +182,18 @@ def parse_records(html):
 
 
 def matches(record):
-    if FILTER_DEPARTURE and FILTER_DEPARTURE not in record.get("departure", ""):
-        return False
 
-    if FILTER_ARRIVAL and FILTER_ARRIVAL not in record.get("arrival", ""):
-        return False
+    if FILTER_DEPARTURE:
+        if FILTER_DEPARTURE not in record.get("departure", ""):
+            return False
+
+    if FILTER_ARRIVAL:
+        if FILTER_ARRIVAL not in record.get("arrival", ""):
+            return False
 
     if FILTER_KEYWORD:
         text = " ".join(record.values()).lower()
+
         if FILTER_KEYWORD.lower() not in text:
             return False
 
@@ -129,23 +201,35 @@ def matches(record):
 
 
 def load_state():
+
     if not STATE_FILE.exists():
         return set()
 
     try:
-        return set(json.loads(STATE_FILE.read_text(encoding="utf-8")))
+        data = json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+
+        return set(data)
+
     except Exception:
         return set()
 
 
 def save_state(state):
+
     STATE_FILE.write_text(
-        json.dumps(list(state)[-5000:], ensure_ascii=False, indent=2),
+        json.dumps(
+            list(state)[-5000:],
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
 
 def discord_send(record):
+
     def esc(value):
         return (
             value.replace("\\", "\\\\")
@@ -156,32 +240,44 @@ def discord_send(record):
     fields = [
         {
             "name": "出発",
-            "value": esc(record.get("departure", "不明")),
+            "value": esc(
+                record.get("departure", "不明")
+            ),
             "inline": False,
         },
         {
             "name": "返却",
-            "value": esc(record.get("arrival", "不明")),
+            "value": esc(
+                record.get("arrival", "不明")
+            ),
             "inline": False,
         },
         {
             "name": "期間",
-            "value": esc(record.get("period", "不明")),
+            "value": esc(
+                record.get("period", "不明")
+            ),
             "inline": True,
         },
         {
             "name": "車種",
-            "value": esc(record.get("car", "不明")),
+            "value": esc(
+                record.get("car", "不明")
+            ),
             "inline": True,
         },
         {
             "name": "条件",
-            "value": esc(record.get("condition", "不明")),
+            "value": esc(
+                record.get("condition", "不明")
+            ),
             "inline": False,
         },
         {
             "name": "予約電話",
-            "value": esc(record.get("phone", "不明")),
+            "value": esc(
+                record.get("phone", "不明")
+            ),
             "inline": True,
         },
     ]
@@ -197,26 +293,59 @@ def discord_send(record):
         ],
     }
 
-    r = requests.post(WEBHOOK_URL, json=payload, timeout=20)
+    response = requests.post(
+        WEBHOOK_URL,
+        json=payload,
+        timeout=20,
+    )
 
-    # Discordのレート制限
-    if r.status_code == 429:
+    # Discordの一時的なレート制限
+    if response.status_code == 429:
+
         try:
-            retry_after = float(r.json().get("retry_after", 5))
+            retry_after = float(
+                response.json().get(
+                    "retry_after",
+                    5,
+                )
+            )
+
         except Exception:
             retry_after = 5
 
-        print(f"Discordレート制限。{retry_after}秒待機します")
+        print(
+            f"Discordレート制限。"
+            f"{retry_after}秒待機します"
+        )
+
         time.sleep(retry_after)
 
-        r = requests.post(WEBHOOK_URL, json=payload, timeout=20)
+        response = requests.post(
+            WEBHOOK_URL,
+            json=payload,
+            timeout=20,
+        )
 
-    r.raise_for_status()
+    response.raise_for_status()
 
 
 def main():
-    response = requests.get(URL, headers=HEADERS, timeout=30)
+
+    # -------------------------
+    # 片道GOページ取得
+    # -------------------------
+
+    response = requests.get(
+        URL,
+        headers=HEADERS,
+        timeout=30,
+    )
+
     response.raise_for_status()
+
+    # -------------------------
+    # 案件解析
+    # -------------------------
 
     records = [
         record
@@ -226,35 +355,81 @@ def main():
 
     print(f"取得: {len(records)}件")
 
+    # -------------------------
+    # 現在掲載されている案件
+    # -------------------------
+
     current = {
         fingerprint(record): record
         for record in records
     }
 
+    # -------------------------
+    # 過去の状態
+    # -------------------------
+
     old = load_state()
 
+    # -------------------------
     # 初回実行
-    # 現在掲載されているものを全部通知すると大量になるので、
-    # テストとして1件だけ送る
+    # -------------------------
+
     if not old:
+
         if current:
+
             first = next(iter(current.values()))
-            print("初回通知:", first)
+
+            print(
+                "初回通知:",
+                first,
+            )
+
             discord_send(first)
 
         save_state(set(current))
-        print("初回実行: 現在掲載中の案件を記録しました")
+
+        print(
+            "初回実行: "
+            "現在掲載中の案件を記録しました"
+        )
+
         return
 
-    # 新着だけ通知
-    new_ids = [fp for fp in current if fp not in old]
+    # -------------------------
+    # 新着案件を探す
+    # -------------------------
 
-    for fp in new_ids:
-        print("新着:", current[fp])
-        discord_send(current[fp])
+    new_ids = [
+        fingerprint_value
+        for fingerprint_value in current
+        if fingerprint_value not in old
+    ]
+
+    # -------------------------
+    # 新着通知
+    # -------------------------
+
+    for fingerprint_value in new_ids:
+
+        record = current[fingerprint_value]
+
+        print(
+            "新着:",
+            record,
+        )
+
+        discord_send(record)
+
+    # -------------------------
+    # 現在の状態を保存
+    # -------------------------
 
     save_state(set(current))
-    print(f"新着通知: {len(new_ids)}件")
+
+    print(
+        f"新着通知: {len(new_ids)}件"
+    )
 
 
 if __name__ == "__main__":
