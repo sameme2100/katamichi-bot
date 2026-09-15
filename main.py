@@ -152,14 +152,14 @@ def main():
 
     # First run is silent by default so the bot doesn't flood Discord with
     # every car currently listed on the official page.
-if not old:
-    if current:
-        first = next(iter(current.values()))
-        print("初回テスト通知:", first)
-        discord_send(first)
-    save_state(set(current))
-    print("初回実行: 現在掲載中の案件を記録しました")
-    return
+    if not old:
+        if current:
+            first = next(iter(current.values()))
+            print("初回テスト通知:", first)
+            discord_send(first)
+        save_state(set(current))
+        print("初回実行: 現在掲載中の案件を記録しました")
+        return
 
     new_ids = [fp for fp in current if fp not in old]
 
