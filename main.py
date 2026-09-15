@@ -150,6 +150,14 @@ def main():
     old = load_state()
     current = {fingerprint(r): r for r in records}
 
+    if os.getenv("SEND_TEST") == "true" and current:
+        first = next(iter(current.values()))
+        print("テスト通知:", first)
+        discord_send(first)
+        return
+
+    # First run is silent by default so the bot doesn't flood Discord with
+
     # First run is silent by default so the bot doesn't flood Discord with
     # every car currently listed on the official page.
     if not old:
