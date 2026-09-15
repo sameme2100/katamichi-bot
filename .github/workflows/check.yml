@@ -1,11 +1,3 @@
-      - name: Discordテスト
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          curl -H "Content-Type: application/json" \
-            -d '{"content":"🚗 片道GO通知Botのテストです！"}' \
-            "$DISCORD_WEBHOOK_URL"
-
 name: 片道GO監視
 
 on:
@@ -29,6 +21,14 @@ jobs:
           python-version: "3.12"
 
       - run: pip install -r requirements.txt
+
+      - name: Discordテスト
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{"content":"🚗 片道GO通知Botのテストです！"}' \
+            "$DISCORD_WEBHOOK_URL"
 
       - name: 片道GOを確認
         env:
