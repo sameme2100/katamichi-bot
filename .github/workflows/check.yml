@@ -1,3 +1,11 @@
+      - name: Discordテスト
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{"content":"🚗 片道GO通知Botのテストです！"}' \
+            "$DISCORD_WEBHOOK_URL"
+
 name: 片道GO監視
 
 on:
